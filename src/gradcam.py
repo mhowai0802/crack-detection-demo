@@ -126,3 +126,64 @@ def compute_gradcam_overlay(
         heatmap = cam.compute(tensor, class_index=class_index)
 
     return overlay_heatmap(image, heatmap, alpha=alpha)
+
+
+def compute_gradcam_map(
+    image: Image.Image,
+    model: nn.Module,
+    class_index: int,
+    device: Union[str, torch.device] = "cpu",
+) -> np.ndarray:
+    """Return the raw normalised Grad-CAM heatmap as an ``[H, W]`` array.
+
+    Unlike :func:`compute_gradcam_overlay`, this does not blend onto the
+    original image. Useful for downstream analysis such as computing the
+    dominant quadrant for an AI-generated inspection note.
+    """
+    if image.mode != "RGB":
+        image = image.convert("RGB")
+
+    transform = get_eval_transform()
+    tensor = transform(image).unsqueeze(0).to(device)
+    tensor.requires_grad_(True)
+
+    target_layer = model.layer4  # type: ignore[attr-defined]
+    with GradCAM(model, target_layer) as cam:
+        heatmap = cam.compute(tensor, class_index=class_index)
+    return heatmap
+
+
+def dominant_quadrant(heatmap: np.ndarray, centre_margin: float = 0.15) -> str:
+    """Describe where a Grad-CAM heatmap concentrates in plain English.
+
+    The heatmap is split into 2x2 quadrants and the one with the highest
+    mean activation wins. If no single quadrant dominates by more than
+    ``centre_margin`` relative to the overall mean, returns
+    ``"centre-heavy"`` instead.
+
+    Returns one of: ``"top-left"``, ``"top-right"``, ``"bottom-left"``,
+    ``"bottom-right"``, ``"centre-heavy"``, or ``"uniform"`` if the map
+    is empty / all zeros.
+    """
+    if heatmap.size == 0:
+        return "uniform"
+
+    overall_mean = float(heatmap.mean())
+    if overall_mean <= 1e-6:
+        return "uniform"
+
+    h, w = heatmap.shape
+    mid_h, mid_w = h // 2, w // 2
+
+    quadrants = {
+        "top-left": heatmap[:mid_h, :mid_w],
+        "top-right": heatmap[:mid_h, mid_w:],
+        "bottom-left": heatmap[mid_h:, :mid_w],
+        "bottom-right": heatmap[mid_h:, mid_w:],
+    }
+    means = {name: float(arr.mean()) for name, arr in quadrants.items()}
+    best_name, best_mean = max(means.items(), key=lambda kv: kv[1])
+
+    if best_mean <= overall_mean * (1.0 + centre_margin):
+        return "centre-heavy"
+    return best_name

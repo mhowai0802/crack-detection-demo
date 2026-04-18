@@ -42,5 +42,10 @@ models/*.pth
 # Streamlit
 .streamlit/secrets.toml
 
+# Secrets
+.env
+.env.local
+!.env.example
+
 # OS
 Thumbs.db
