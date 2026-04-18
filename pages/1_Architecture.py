@@ -10,17 +10,43 @@ st.set_page_config(
     layout="wide",
 )
 
+sidebar = st.sidebar
+sidebar.title(":material/architecture: Architecture")
+sidebar.caption("系統架構講解 · how the demo is built")
+sidebar.divider()
+with sidebar.expander(":material/list: 內容目錄", expanded=True):
+    st.markdown(
+        """
+        1. 整體流程 (Data flow)
+        2. 模型 (Model)
+        3. 訓練策略 (Training)
+        4. 數據集 (Dataset)
+        5. 推論流程 (Inference)
+        6. Grad-CAM 解釋
+        7. 模型評估 (Evaluation 頁)
+        8. HKBU GenAI 整合 (AI 功能)
+        9. 專案目錄結構
+        10. 已知限制 (Limitations)
+        """
+    )
+sidebar.divider()
+sidebar.caption(
+    "呢頁純文字 + Graphviz,無需要揀相。想試模型就返 Home,"
+    "想睇數字就去 Evaluation。"
+)
+
 st.title("系統架構")
 st.caption(
     "由頭到尾講解個裂縫分類器係點樣砌出嚟:"
-    "數據、模型、訓練、推論同解釋。"
+    "數據、模型、訓練、推論、解釋、評估,同 HKBU GenAI 整合。"
 )
 
 st.markdown(
     """
-    呢個 demo 雖然細細個,但係一個幾實用嘅 transfer learning pipeline。
-    下面嘅部份會一步步講清楚,由你揀咗張相到主頁面彈出「Crack / No Crack」
-    結果之間,中間究竟發生咗啲乜嘢事。
+    呢個 demo 雖然細細個,但係一個幾完整嘅 transfer learning + LLM
+    pipeline。下面嘅部份會一步步講清楚,由你揀咗張相到主頁面彈出
+    「Crack / No Crack」結果、AI 檢查備註同對話之間,中間究竟發生咗
+    啲乜嘢事;另外亦都會講埋 Evaluation 頁點樣獨立 re-score 個 checkpoint。
     """
 )
 
@@ -37,7 +63,7 @@ st.graphviz_chart(
               fontname="Helvetica", fontsize=11];
         edge [fontname="Helvetica", fontsize=10];
 
-        upload   [label="揀張相\\n(JPG / PNG)"];
+        upload   [label="揀張相\\n(sample image)"];
         preprocess [label="預處理\\nResize 224x224\\nImageNet normalise"];
         model    [label="ResNet18 backbone\\n+ 2 類 classifier head"];
         softmax  [label="Softmax\\n[P(No Crack), P(Crack)]"];
@@ -45,9 +71,20 @@ st.graphviz_chart(
         gradcam  [label="Grad-CAM\\n(喺 layer4 做)", fillcolor="#fff4e6"];
         overlay  [label="熱力圖疊上去\\n(視覺解釋)",
                   fillcolor="#fff4e6"];
+        quadrant [label="Dominant quadrant\\n(top-left / ... / centre-heavy)",
+                  fillcolor="#fff4e6"];
+        prompt   [label="build_prediction_context\\n(label + probs + focus)",
+                  fillcolor="#f3e6ff"];
+        llm      [label="HKBU GenAI\\nchat / chat_messages",
+                  fillcolor="#f3e6ff"];
+        ai       [label="AI 檢查備註 + 對答",
+                  fillcolor="#f3e6ff"];
 
         upload -> preprocess -> model -> softmax -> verdict;
         model -> gradcam -> overlay;
+        gradcam -> quadrant -> prompt;
+        verdict -> prompt;
+        prompt -> llm -> ai;
     }
     """,
     use_container_width=True,
@@ -57,7 +94,9 @@ st.markdown(
     """
     - **藍色分支 (分類):** 出 label 同 confidence。
     - **橙色分支 (解釋):** 用同一次 forward pass 計出嚟嘅 gradient,
-      做 Grad-CAM 熱力圖。
+      做 Grad-CAM 熱力圖,再提取「邊個象限最熱」嘅 hint。
+    - **紫色分支 (AI):** 將預測結果 + Grad-CAM focus 打包成一段 context,
+      交俾 HKBU GenAI 生成檢查備註或者回答 follow-up 問題。詳情睇第 7 節。
     """
 )
 
@@ -84,8 +123,10 @@ with col_a:
 
         呢個係典型 transfer learning:backbone 已經識得提取一啲
         common 嘅 visual feature (例如邊緣、紋理、形狀),
-        所以唔洗好多 crack 相,都可以 fine-tune 到成 98% 以上
-        val accuracy (用返 Mendeley 全個 dataset 嘅話)。
+        所以就算淨係用咗 3,200 張 patch (HuggingFace mirror),
+        fine-tune 出嚟喺 seeded 80/20 validation split 都可以做到
+        **~97% accuracy、Crack F1 ≈ 0.96**。想睇實時數字就去 Evaluation
+        頁;section 6 再講個 pipeline 點行。
         """
     )
 
@@ -386,27 +427,181 @@ st.info(
 
 st.divider()
 
+# -------------------- Evaluation --------------------
+st.header("7. 模型評估 (Evaluation 頁)")
+
+st.markdown(
+    """
+    `pages/2_Evaluation.py` 係一個獨立 dashboard,專門 re-score 現時
+    `models/crack_classifier.pt`。邏輯抽咗去 `src/evaluate.py`,
+    所以同樣可以喺 notebook 或者 smoke test 入面重用。
+
+    **Pipeline 嘅重點:**
+
+    1. 用同 training 時 **一樣 seed 嘅 80 / 20 split**
+       (`torch.Generator().manual_seed(42)`),確保度量到嘅係真
+       held-out set,唔係睇過嘅訓練相。
+    2. 跑一次 forward pass 攞到成個 validation set 嘅
+       softmax 機率 `probs[N, 2]`,連埋每張相嘅 file path 儲起。
+    3. 任何同 threshold 相關嘅 metric (accuracy、confusion matrix、
+       per-class precision / recall / F1) 之後都可以
+       `metrics_at_threshold(probs, targets, t)` 即時計出嚟,
+       唔使 forward 多次 —— 所以 sidebar 嘅 threshold slider 拉到
+       邊,數字就跳到邊。
+    """
+)
+
+st.graphviz_chart(
+    """
+    digraph Eval {
+        rankdir=LR;
+        node [shape=box, style="rounded,filled",
+              fontname="Helvetica", fontsize=11];
+        edge [fontname="Helvetica", fontsize=10];
+
+        ckpt [label="models/crack_classifier.pt",
+              shape=cylinder, fillcolor="#e6ffed"];
+        data [label="data/Positive + Negative\\n(3,200 patches)",
+              shape=cylinder, fillcolor="#e6ffed"];
+        split [label="seeded 80/20 split\\n(Generator seed=42)",
+               fillcolor="#eef5ff"];
+        fwd   [label="forward pass (no_grad)\\n-> probs[N, 2]",
+               fillcolor="#eef5ff"];
+        store [label="EvaluationResult\\n(probs, targets, paths)",
+               shape=note, fillcolor="#fff0f0"];
+        thr   [label="metrics_at_threshold(t)",
+               fillcolor="#fff4e6"];
+        ui    [label="Accuracy / P / R / F1\\nConfusion matrix\\nThreshold sweep\\nWorst errors",
+               fillcolor="#fff4e6"];
+
+        data -> split -> fwd;
+        ckpt -> fwd -> store -> thr -> ui;
+    }
+    """,
+    use_container_width=True,
+)
+
+st.markdown(
+    """
+    頁面入面你會見到:
+
+    - **Dataset 同 split** — total / train / val / 每個 class 嘅 support。
+    - **Headline metrics** — Accuracy、Crack recall (最重要,漏報就
+      大鑊)、Crack precision。
+    - **Classification report** — 兩個 class 齊齊有 precision / recall /
+      F1 / support。
+    - **Confusion matrix** — 2×2 table 配埋 TP / FP / FN / TN
+      caption,同旁邊個 bar chart 對照。
+    - **Threshold sweep** — 掃 0.05 → 0.95 睇 accuracy / crack P / R /
+      F1 點樣換,幫手決定個 sidebar threshold 調幾多最合理。
+    - **錯得最離譜嘅樣本** — 按「信心離 threshold 有幾遠」排序,
+      click 到每張真係有 predictions wrong 嘅 patch。
+    """
+)
+
+st.caption(
+    "Cache: `@st.cache_data` 嘅 key 包括 checkpoint 個 mtime + split 設定,"
+    "所以 retrain 完拎返新 .pt,refresh 一次頁就自動 invalidate,"
+    "唔會俾你睇到舊 model 嘅數字。"
+)
+
+st.divider()
+
+# -------------------- AI features --------------------
+st.header("8. HKBU GenAI 整合 (AI 功能)")
+
+st.markdown(
+    """
+    主頁面除咗 Crack / No Crack 之外,仲會將預測結果交俾 HKBU GenAI
+    (預設 `gpt-4.1-mini`,經 Azure-style REST endpoint)。
+    嚟源碼分三層:
+
+    - `src/llm.py` — thin wrapper,load `.env`、check `HKBU_API_KEY`、
+      共用一個 `_post_chat()` helper,expose 兩個 public function:
+      `chat(system, user, ...)` (single-turn) 同
+      `chat_messages(messages, ...)` (multi-turn history)。
+    - `src/ai_prompts.py` — 中 / 英 system prompt 同
+      `build_prediction_context(prediction, threshold, grad_cam_hint)`,
+      將預測打包成一段簡潔 context,避免個 model 亂估數字。
+    - `app.py` — button-gated 「生成 AI 檢查報告」section 同
+      `st.chat_input` 對答框,history 最多保留 8 回合,換 sample
+      自動清 chat + report,避免上一張相嘅 context 捲入新題。
+    """
+)
+
+st.graphviz_chart(
+    """
+    digraph LLM {
+        rankdir=LR;
+        node [shape=box, style="rounded,filled", fontname="Helvetica",
+              fontsize=11];
+        edge [fontname="Helvetica", fontsize=10];
+
+        pred [label="Prediction\\nlabel + probs"];
+        cam  [label="Grad-CAM focus\\n(dominant_quadrant)"];
+        ctx  [label="build_prediction_context()\\n[Prediction] / [Threshold] /\\n[Grad-CAM focus]",
+              fillcolor="#fff4e6"];
+        sys  [label="SYSTEM_REPORT_* /\\nSYSTEM_CHAT_*",
+              fillcolor="#fff4e6"];
+        llm  [label="HKBU GenAI\\nchat() / chat_messages()",
+              fillcolor="#f3e6ff"];
+        rep  [label="AI 檢查備註\\n(session_state['last_report'])",
+              fillcolor="#e6ffed"];
+        chat [label="問答歷史\\n(session_state['chat_history'])",
+              fillcolor="#e6ffed"];
+
+        pred -> ctx;
+        cam  -> ctx;
+        sys  -> llm;
+        ctx  -> llm;
+        llm  -> rep;
+        llm  -> chat;
+    }
+    """,
+    use_container_width=True,
+)
+
+st.markdown(
+    """
+    **Cost / latency note.** Model 由 `.env` 嘅 `HKBU_MODEL` 控制
+    (目前 `gpt-4.1-mini`,快 + 平)。報告每撳一次 button 先叫一次
+    API,大概 350 tokens;chat 每次用戶出 message 先會 call。
+    兩邊都用 `try/except LLMConfigError / LLMRequestError`,
+    如果 API key 唔見或者 endpoint 出錯,主頁會係紅色 banner
+    提示,完全唔會 crash 成個 app。
+    """
+)
+
+st.divider()
+
 # -------------------- Repo layout --------------------
-st.header("7. 專案目錄結構")
+st.header("9. 專案目錄結構")
 
 st.code(
     """.
-app.py                 # Streamlit 主頁 (揀相 + 預測 + Grad-CAM)
+app.py                 # Streamlit 主頁 (揀相 + 預測 + Grad-CAM + AI 備註 + 對答)
 pages/
   1_Architecture.py    # <- 你而家睇緊呢一頁
+  2_Evaluation.py      # 用 seeded val split 重新評估現時 checkpoint
 src/
   model.py             # ResNet18 + 新 classifier head,load/save helper
   dataset.py           # CrackDataset 同 train/eval transform
   train.py             # 兩階段 CLI training script
   predict.py           # 單張相嘅推論 helper
-  gradcam.py           # Grad-CAM 同 overlay 實作
+  gradcam.py           # Grad-CAM overlay / raw map / dominant_quadrant
+  evaluate.py          # evaluate_checkpoint + metrics_at_threshold
+  llm.py               # HKBU GenAI REST wrapper (chat / chat_messages)
+  ai_prompts.py        # ZH/EN system prompt + build_prediction_context
 scripts/
   prepare_data.py      # 由 HuggingFace parquet 整返個分類 dataset
+  smoke_test.py        # 跑一次全部 backend module 嘅 sanity check
 notebooks/
   01_explore_and_train.ipynb
 sample_images/         # 主頁 dropdown 用嘅示範相
 models/                # 訓練好嘅 .pt weight (gitignored)
 data/                  # 原始 / 生成嘅 dataset (gitignored)
+.env                   # HKBU_API_KEY 等 secret (gitignored)
+.env.example           # 俾其他人參考嘅 template
 requirements.txt
 README.md""",
     language="text",
@@ -415,7 +610,7 @@ README.md""",
 st.divider()
 
 # -------------------- Limitations --------------------
-st.header("8. 已知限制 (Limitations)")
+st.header("10. 已知限制 (Limitations)")
 
 st.markdown(
     """
@@ -427,8 +622,17 @@ st.markdown(
     - **Confidence 未 calibrate。** softmax 個 probability *唔係*
       真實世界 damage 嘅機率,threshold 要當成 operational knob 去調,
       唔好當佢係機率解讀。
+    - **Val 唔係 test。** Evaluation 頁報嘅係 held-out **validation**
+      accuracy;因為 training 時揀 best-val checkpoint,呢個數
+      係 generalisation 嘅 **樂觀上限**。想做真·unbiased evaluation
+      要另外切一個冇掂過嘅 test set (例如 70 / 15 / 15)。
     - **Grad-CAM 係粗粒度嘅。** Upsample 之前先至 7x7,
-      佢係一種「解釋」,唔係 segmentation mask。
+      佢係一種「解釋」,唔係 segmentation mask。`dominant_quadrant`
+      俾 LLM 做 hint,亦都係象限級嘅粗描述,唔好當 pixel 定位。
+    - **LLM 會錯。** HKBU GenAI 只係睇到預測結果字串,冇睇原圖,
+      所以佢嘅「成因推斷」係一般土木知識 + 當前 prediction 嘅 paraphrase,
+      唔可以代替駐場工程師判斷。`.env` 無 `HKBU_API_KEY` 會 fallback
+      到 error banner,唔會 crash,但 AI section 就用唔到。
     - **淨係針對混凝土。** 磚、柏油、木,統統超出範圍。
     """
 )
