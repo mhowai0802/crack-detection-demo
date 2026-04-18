@@ -71,37 +71,70 @@ def list_sample_images() -> List[Path]:
 
 
 def render_sidebar() -> dict:
-    st.sidebar.header("Settings")
-    st.sidebar.markdown(
-        "**Model:** ResNet18 fine-tuned on the Mendeley concrete crack dataset."
+    sidebar = st.sidebar
+    sidebar.title(":construction: Crack Detection")
+    sidebar.caption(
+        "ResNet18 + Grad-CAM + HKBU GenAI · ResNet18 transfer learning demo"
     )
+    sidebar.divider()
 
-    show_cam = st.sidebar.toggle("Show Grad-CAM heatmap", value=True)
-    cam_alpha = st.sidebar.slider(
-        "Heatmap opacity", min_value=0.1, max_value=0.9, value=0.45, step=0.05
-    )
-    threshold = st.sidebar.slider(
-        "Crack alert threshold",
-        min_value=0.1,
-        max_value=0.99,
-        value=0.5,
-        step=0.01,
-        help="If the crack probability is above this, the site is flagged.",
-    )
+    with sidebar.expander(":material/visibility: Display", expanded=True):
+        show_cam = st.toggle("Show Grad-CAM heatmap", value=True)
+        cam_alpha = st.slider(
+            "Heatmap opacity",
+            min_value=0.1,
+            max_value=0.9,
+            value=0.45,
+            step=0.05,
+            disabled=not show_cam,
+        )
 
-    lang_label = st.sidebar.radio(
-        "AI reply language / AI 回覆語言",
-        ["廣東話", "English"],
-        index=0,
-        horizontal=True,
-    )
-    lang = "zh" if lang_label == "廣東話" else "en"
+    with sidebar.expander(":material/notifications_active: Alert rule", expanded=True):
+        threshold = st.slider(
+            "Crack alert threshold — P(Crack) ≥ ?",
+            min_value=0.1,
+            max_value=0.99,
+            value=0.5,
+            step=0.01,
+            help=(
+                "If the crack probability is above this, the site is flagged. "
+                "Lowering it favours recall (catch more cracks); raising it "
+                "favours precision (fewer false alarms)."
+            ),
+        )
+        st.caption(f"Current rule: flag when P(Crack) ≥ **{threshold:.2f}**")
+
+    with sidebar.expander(":material/smart_toy: AI assistant", expanded=True):
+        lang_label = st.radio(
+            "Reply language / 回覆語言",
+            ["廣東話", "English"],
+            index=0,
+            horizontal=True,
+        )
+        lang = "zh" if lang_label == "廣東話" else "en"
+        st.caption(
+            "用嚟控制 AI 檢查備註 + 對答框嘅語言。"
+            if lang == "zh"
+            else "Controls the AI inspection note and chat reply language."
+        )
+
+    sidebar.divider()
+    with sidebar.expander(":material/info: About", expanded=False):
+        st.markdown(
+            "**Model:** ResNet18 fine-tuned on a 3,200-patch mirror of the "
+            "Mendeley concrete crack dataset.\n\n"
+            "**Pages:**\n"
+            "- Home — classify a sample + AI note + chat\n"
+            "- Architecture — how the pipeline is built\n"
+            "- Evaluation — re-score the current checkpoint"
+        )
 
     if not MODEL_PATH.exists():
-        st.sidebar.warning(
+        sidebar.warning(
             "No trained weights found at `models/crack_classifier.pt`. "
             "The app is running on an untrained model; predictions will be random. "
-            "Train with `python -m src.train --data-dir data/`."
+            "Train with `python -m src.train --data-dir data/`.",
+            icon=":material/warning:",
         )
 
     return {
