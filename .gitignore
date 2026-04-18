@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual envs
+.venv/
+venv/
+env/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Dataset (too large to commit)
+data/
+!data/.gitkeep
+
+# Training artifacts
+runs/
+logs/
+*.log
+wandb/
+
+# Model weights (commit via Git LFS or GitHub release instead)
+models/*.pt
+models/*.pth
+!models/.gitkeep
+
+# Streamlit
+.streamlit/secrets.toml
+
+# OS
+Thumbs.db
