@@ -80,13 +80,24 @@ st.caption(
 )
 
 st.info(
-    "📌 **定位一句話:** 「呢個係一個貼近 **HK MBIS** 場景嘅兩段式混凝土裂縫偵測 "
-    "demo — ResNet18 classifier 做快速 triage,偵測到 Crack 再 trigger 一個 "
-    "~1.9M 參數嘅小型 U-Net 出 **pixel mask + max-width / length**,配埋 "
-    "Grad-CAM 解釋,再由 HKBU GenAI 生成符合 **SUC 2013 / PNAP APP-137 / "
-    "Buildings Ordinance** 格式嘅中/英文檢查報告;前後端分開,FastAPI 做 "
-    "backend、Streamlit 做 frontend。」",
+    "📌 **定位一句話:** 「呢個係為 **HK drone-based facade inspection + 跨界別"
+    "持續監測** 場景設計嘅兩段式混凝土裂縫偵測 demo — ResNet18 classifier 做快速"
+    " triage (1,000 張 drone 相 ~10 秒篩完),偵測到 Crack 再 trigger ~1.9M 參數嘅"
+    "小型 U-Net 出 **pixel mask + max-width / length**,配 Grad-CAM 解釋,"
+    "由 HKBU GenAI 按 **SUC 2013 / PNAP APP-137 / BO Cap. 123** 格式生成中/英文"
+    "報告。啱 MBIS (10 年) / MWIS (5 年) / construction-phase QC / infrastructure "
+    "routine inspection / post-typhoon 緊急巡查,前後端 FastAPI + Streamlit 分離。」",
     icon=":material/lightbulb:",
+)
+
+st.warning(
+    "⚠️ **常見 interviewer 反擊:** 『MBIS 10 年先一次,點解要 AI?』—— "
+    "呢條係測試你識唔識講真實 value prop。答案唔係『快過人手』,而係 "
+    "**(a) drone capture 一次 1,000-3,000 張相嘅 batch triage**、"
+    "**(b) 由 10 年 reactive 變每季 proactive continuous monitoring**、"
+    "**(c) multi-vertical (MWIS / GEO 斜坡 / infrastructure / construction QC)** — "
+    "詳見 Q2 + Q2b。",
+    icon=":material/campaign:",
 )
 
 st.divider()
@@ -509,32 +520,36 @@ st.header("1. 項目概覽 (Project overview)")
 qa(
     "Q1. 可唔可以一分鐘內介紹吓呢個 project?",
     [
-        "**問題:** HK MBIS 每 10 年一次強制樓宇檢驗,RSE / AP 要逐張相判 "
-        "「有冇 crack、喺邊、幾闊」,手動又慢又主觀。",
-        "**方案(兩段式):**\n"
-        "    (1) ResNet18 transfer learning 做 **Crack vs No Crack triage**;\n"
-        "    (2) 一旦 flagged 做 Crack,trigger 一個 ~1.9M 參數嘅小型 "
-        "**U-Net** 出 **pixel mask + max width / length (px)**,作為 "
-        "HK SUC 2013 / PNAP APP-137 合規討論嘅 pixel-level 證據。",
-        "**解釋性:** Grad-CAM (classifier 嘅注意力) 同 U-Net mask "
-        "(真係 crack pixels) 並排顯示 — 係 debug classifier 係咪 "
-        "look-at-the-right-thing 嘅快速工具。",
+        "**市場 context:** HK 有 **~60,000 幢私人樓 + 公共屋邨 + 斜坡 + 基建** "
+        "受 BD / Highways / GEO / MTR 監管。MBIS (每 10 年) / MWIS (每 5 年) 只係"
+        "法例 baseline;行業真 pain point 係 **drone-based inspection** —— "
+        "Gammon / Chun Wo / Hip Hing / Link REIT 而家一次 flyover capture "
+        "**1,000-3,000 張** 外牆相,人手 screening 要 3-5 人日,係 bottleneck。",
+        "**方案(兩段式 triage pipeline):**\n"
+        "    (1) ResNet18 transfer learning 做 **Crack vs No Crack triage** "
+        "(10ms/張,1,000 張 drone 相 ~10 秒篩完);\n"
+        "    (2) Flagged 做 Crack 先 trigger 一個 ~1.9M 參數嘅小型 **U-Net** "
+        "出 **pixel mask + max width / length (px)**,作為 HK SUC 2013 / "
+        "PNAP APP-137 合規討論嘅 pixel-level 證據。",
+        "**解釋性:** Grad-CAM (classifier 注意力) 同 U-Net mask (真 crack "
+        "pixels) 並排;係 debug classifier 係咪 look-at-the-right-thing 嘅"
+        "快速工具,亦都 serve 做 audit trail (insurance / legal / BD challenge)。",
         "**數字:** 分類用 Özgenel CCIC (3,200 patch,70/15/15 split),"
         "test accuracy ~97%、Crack F1 ≈ 0.96;分割用 DeepCrack "
         "(537 + 237),val IoU ≈ 0.72。",
-        "**HK 味道:** AI 報告用中/英文雙語,prompt 明確引 SUC 2013 "
-        "(0.2 / 0.3 mm 裂縫限值)、PNAP APP-137、Buildings Ordinance "
-        "Cap. 123;`scripts/fetch_hk_samples.py` 可以 local download "
-        "BD Common Building Defects gallery(`.gitignore` 保護,"
-        "唔 push)做 interview demo。",
-        "**架構:** FastAPI backend 獨佔所有 torch / LLM / OpenCV,"
-        "Streamlit frontend 純 HTTP client;兩者獨立 Dockerize、"
-        "獨立 scale、獨立換掉。",
+        "**HK 味道:** AI 報告用中/英文,prompt 明確引 SUC 2013 "
+        "(0.2 / 0.3 mm 裂縫限值)、PNAP APP-137、BO Cap. 123;"
+        "`scripts/fetch_hk_samples.py` 可以 local download BD Common Building "
+        "Defects gallery (`.gitignore` 保護 Crown Copyright)。",
+        "**架構:** FastAPI backend 獨佔 torch / LLM / OpenCV,"
+        "Streamlit frontend 純 HTTP client;獨立 Dockerize + scale,"
+        "同一 API 將來可以接 mobile / React / drone SDK。",
     ],
     [
+        "MBIS 10 年先一次,AI 真係值得開發咪?(Q2 + Q2b)",
         "點解揀 concrete crack,唔揀 spalling 或者 rebar rust?",
         "點解唔淨係 classification、又再加 segmentation?(Q3 會深入)",
-        "你用過邊啲 stakeholder feedback 去 refine?",
+        "Drone-based facade inspection 喺 HK 合法規 (CAD / BD) 有冇問題?",
     ],
     icon=":material/rocket_launch:",
 )
@@ -542,22 +557,73 @@ qa(
 qa(
     "Q2. 呢個 project 解決咩 business pain point?ROI 點計?",
     [
-        "**人力成本:** 傳統人手巡查,1 個工程師走一個 site 可以用半日;"
-        "AI 可以 30 秒處理一張相,配合相機或者 drone 做 batch screening。",
-        "**安全風險:** 人眼有 fatigue / inconsistency,漏咗一條 crack "
-        "可能等於一個結構問題;AI 可以先做 triage,"
-        "將「明顯有裂」同「明顯冇裂」分開,工程師只 focus 模棱兩可個堆。",
-        "**可追溯:** 每次預測都有時間、位置、confidence、Grad-CAM,"
-        "係 auditable 嘅紀錄,對 QA / insurance / legal 有用。",
-        "**ROI:** 就算 precision 未達 100%,做 triage 都可以令工程師吞吐量"
-        "翻幾倍;FP 成本係「多睇一張相」,FN 成本先係大鑊,"
-        "所以 threshold 要調細少少 (high recall)。",
+        "**核心 value 唔係『快過人手睇一張相』,係『令 drone-scale 同持續"
+        "監測變可行』:**",
+        "**(1) Drone inspection scale-out:** 一幢 30 層住宅大廈 drone 一次 "
+        "capture 1,500-3,000 張外牆相。人手逐張 screening 係 3-5 人日 @ "
+        "~HK$5K/日 = **~HK$15K-25K 人力/幢**。AI triage 15 分鐘剩 5-10% "
+        "需要 expert review。**更大嘅省錢位:** 一次 drone inspection 代替 "
+        "scaffolding ~HK$100K-500K,但 drone 產生嘅 photo volume 人手 "
+        "handle 唔到 → AI 係令 drone inspection 可行嘅關鍵一塊。",
+        "**(2) 由 reactive 變 proactive continuous monitoring:** MBIS 10 年、"
+        "MWIS 5 年只係法例底線。大 landlord (Link REIT / HKHS / HKHA / MTR "
+        "物業 / HKSTP / HKIA / PolyU 屋邨) 其實**非常有誘因每季或半年**自己做"
+        " drone flyover,提早 detect 結構惡化 — 好過等到第 10 年 statutory "
+        "inspection 先發現要大修。AI 令每季 inspection 嘅 marginal cost 接近"
+        "零,之前 infeasible 而家 feasible。",
+        "**(3) Cross-sector deploy (同一 model, 多 vertical):** "
+        "MBIS (每 10 年) / MWIS 窗戶 (每 5 年) / GEO 斜坡 (每 5 年) / "
+        "construction-phase concrete QC (每澆灌) / post-typhoon 緊急"
+        "巡查 / 基建 (MTR tunnel / Highways Dept 天橋每年 visual) / "
+        "保險 due diligence。單一 trained model,multi-vertical 賣。",
+        "**(4) Augment RSE / AP, 唔係取代:** Triage 減 ~95% 時間,剩 5% "
+        "由 RSE focus;AI 提供 **audit trail** (time, confidence, Grad-CAM, "
+        "mask + width) 對保險 / legal / BD challenge 極有用,傳統純人手 "
+        "report 冇呢層 evidence。",
+        "**(5) Threshold 調節:** FN (漏真裂) cost >> FP (多睇一張相),"
+        "recall 優先,threshold 設 ~0.3-0.4 換多啲 FP 返少啲 FN。",
     ],
     [
-        "FN 成本如果量化,你會點估?",
+        "1 幢樓 AI 省 HK$15K-25K,你點向 100 幢樓嘅 property manager sell?",
+        "每季 continuous monitoring,業主法團會肯畀錢咪?",
+        "RSE / AP 會唔會抗拒 AI,覺得搶飯碗?",
         "點同工地既有嘅 safety workflow integrate?",
     ],
     icon=":material/query_stats:",
+)
+
+qa(
+    "Q2b. 『MBIS 10 年先一次,使唔使 AI?』你點 counter?",
+    [
+        "**先 reframe 個 question:** MBIS 只係 **compliance baseline**,"
+        "唔係 inspection 市場本身。真實市場包含:\n"
+        "    - **Statutory:** MBIS 10 年、MWIS 5 年、GEO 斜坡 5 年\n"
+        "    - **Construction phase:** 新建樓每次 concrete pour 都要 QC,"
+        "precast element 入場要驗\n"
+        "    - **Infrastructure:** MTR tunnel / Highways 橋樑 / 渠務 box "
+        "culvert / 水務署水缸 — 多數 **每年** visual inspection\n"
+        "    - **Event-triggered:** 颱風、地震、火災、水浸 → emergency 檢驗\n"
+        "    - **Property transactions:** 成交前 due diligence 驗樓\n"
+        "    - **Insurance:** policy renewal 要 condition report",
+        "**再 reframe scale:** 就算淨計 MBIS,HK ~60,000 幢樓 / 10 年 = "
+        "**每年 ~6,000 幢**需要做。每幢 drone 拍 1,000-3,000 張,即全港 "
+        "**每年 600 萬 - 1,800 萬張 facade 相需要 screening**。呢個 volume "
+        "唔係單一 project 嘅 10 年一次,係一個 continuous pipeline。",
+        "**最大嘅 shift:** AI 嘅真 value 係**降低 inspection unit cost** "
+        "令『每 10 年』可以變『每季』— 結構安全 preventive maintenance "
+        "係 global trend (e.g. UK BS 7913、日本國交省指引),HK 遲早跟。"
+        "個 model train 好,可以喺呢個 transition 做 head-start。",
+        "**承認 limitation:** 如果 interviewer 堅持『而家個客只 care 10 年"
+        "一次』,我會答『咁可能呢個 specific client 唔 fit;但 multi-"
+        "vertical 市場仲有 MWIS / construction / infrastructure 5 個 "
+        "vertical 可以接,pivot 成本低』。",
+    ],
+    [
+        "Preventive maintenance 嘅 ROI 點 quantify?",
+        "你點 convince 到保守嘅 RSE 行業 adopt AI?",
+        "BD 合規流程點 accommodate AI-assisted report?",
+    ],
+    icon=":material/help_outline:",
 )
 
 qa(
