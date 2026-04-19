@@ -20,13 +20,14 @@ with sidebar.expander(":material/list: 內容目錄", expanded=True):
         1. 整體流程 (Data flow)
         2. 模型 (Model)
         3. 訓練策略 (Training)
-        4. 數據集 (Dataset)
+        4. 數據集 (Datasets)
         5. 推論流程 (Inference)
         6. Grad-CAM 解釋
-        7. 模型評估 (Evaluation 頁)
-        8. HKBU GenAI 整合 (AI 功能)
-        9. 專案目錄結構
-        10. 已知限制 (Limitations)
+        7. Segmentation (U-Net) 分支
+        8. 模型評估 (Evaluation 頁)
+        9. HKBU GenAI 整合 (AI 功能)
+        10. 專案目錄結構
+        11. 已知限制 (Limitations)
         """
     )
 sidebar.divider()
@@ -47,6 +48,11 @@ st.markdown(
     pipeline。下面嘅部份會一步步講清楚,由你揀咗張相到主頁面彈出
     「Crack / No Crack」結果、AI 檢查備註同對話之間,中間究竟發生咗
     啲乜嘢事;另外亦都會講埋 Evaluation 頁點樣獨立 re-score 個 checkpoint。
+
+    > 🧱 **架構:** 前後端已經分開。FastAPI **backend** (`backend/main.py`)
+    > 獨家負責 PyTorch 模型、Grad-CAM 同 HKBU GenAI 呼叫;
+    > Streamlit **frontend** (`frontend/🏠_Home.py`) 淨係 HTTP client,
+    > 透過 `frontend/api_client.py` 打 backend 嘅 `/api/*` endpoint。
     """
 )
 
@@ -73,17 +79,23 @@ st.graphviz_chart(
                   fillcolor="#fff4e6"];
         quadrant [label="Dominant quadrant\\n(top-left / ... / centre-heavy)",
                   fillcolor="#fff4e6"];
-        prompt   [label="build_prediction_context\\n(label + probs + focus)",
+        seg      [label="U-Net segmenter\\n(只喺 Crack 時 trigger)",
+                  fillcolor="#e6f0ff"];
+        mask     [label="Binary mask + overlay\\n+ stats (coverage / width_px /\\nlength_px / components)",
+                  fillcolor="#e6f0ff"];
+        prompt   [label="build_prediction_context\\n(label + probs + focus +\\n[Segmentation] block)",
                   fillcolor="#f3e6ff"];
         llm      [label="HKBU GenAI\\nchat / chat_messages",
                   fillcolor="#f3e6ff"];
-        ai       [label="AI 檢查備註 + 對答",
+        ai       [label="AI 檢查報告 (HK compliance)",
                   fillcolor="#f3e6ff"];
 
         upload -> preprocess -> model -> softmax -> verdict;
         model -> gradcam -> overlay;
         gradcam -> quadrant -> prompt;
         verdict -> prompt;
+        verdict -> seg [label="positive"];
+        seg -> mask -> prompt;
         prompt -> llm -> ai;
     }
     """,
@@ -92,11 +104,16 @@ st.graphviz_chart(
 
 st.markdown(
     """
-    - **藍色分支 (分類):** 出 label 同 confidence。
-    - **橙色分支 (解釋):** 用同一次 forward pass 計出嚟嘅 gradient,
+    - **藍色分支 (分類):** ResNet18 出 label 同 confidence。
+    - **橙色分支 (Grad-CAM):** 用同一次 forward pass 計出嚟嘅 gradient,
       做 Grad-CAM 熱力圖,再提取「邊個象限最熱」嘅 hint。
-    - **紫色分支 (AI):** 將預測結果 + Grad-CAM focus 打包成一段 context,
-      交俾 HKBU GenAI 生成檢查備註或者回答 follow-up 問題。詳情睇第 7 節。
+    - **淺藍分支 (Segmentation):** 預測係 Crack 時,call 細 U-Net
+      出 pixel-level mask,再衍生 coverage / max width / length /
+      component count 等 metric — 直接對應 HK MBIS / SUC 2013
+      「where + how bad」問題。詳情睇第 7 節。
+    - **紫色分支 (AI):** 將預測結果 + Grad-CAM focus + segmentation
+      stats 打包成一段 context,交俾 HKBU GenAI 生成 HK 合規報告格式
+      嘅檢查備註。詳情睇第 9 節。
     """
 )
 
@@ -124,9 +141,10 @@ with col_a:
         呢個係典型 transfer learning:backbone 已經識得提取一啲
         common 嘅 visual feature (例如邊緣、紋理、形狀),
         所以就算淨係用咗 3,200 張 patch (HuggingFace mirror),
-        fine-tune 出嚟喺 seeded 80/20 validation split 都可以做到
-        **~97% accuracy、Crack F1 ≈ 0.96**。想睇實時數字就去 Evaluation
-        頁;section 6 再講個 pipeline 點行。
+        fine-tune 出嚟喺 seeded **70 / 15 / 15 train/val/test split**
+        都可以做到 **~97% accuracy、Crack F1 ≈ 0.96** on held-out
+        **test** slice。想睇實時數字就去 Evaluation 頁;
+        section 6 再講個 pipeline 點行。
         """
     )
 
@@ -255,39 +273,79 @@ st.markdown(
     """
     **Augmentation** (淨係 training split 先用): random 水平/垂直翻轉、
     最多 15 度 rotation、輕微 color jitter。
-    Validation 嗰邊就 deterministic,只有 resize + ImageNet normalise。
+    Val / test 嗰邊就 deterministic,只有 resize + ImageNet normalise,
+    確保 3 個 slice 嘅數字可以直接比較。
+
+    **Split**: `src/splits.py` 係 single source of truth — `train.py`
+    同 `evaluate.py` 都從呢度攞 `(train_idx, val_idx, test_idx)`。
+    預設 70 / 15 / 15,seed = 42。Train 用嚟做 gradient update,
+    **Val** 逐個 epoch 監察、揀 best checkpoint,**Test** 完全冇掂過,
+    訓練結束先跑一次,俾一個冇 selection bias 嘅 generalisation 數字。
 
     **Loss**: 用 standard `CrossEntropyLoss`。Mendeley dataset 兩個 class
     係 50/50,所以唔洗做 class weighting。
+
+    ---
+
+    **U-Net segmenter training** (見 `src/seg_train.py`) 獨立另一個
+    pipeline,同 classifier 完全分開:
+
+    - **Loss**: BCE-with-logits + Soft Dice (50/50 blend,對 thin-crack
+      class imbalance 特別友善)。
+    - **Optimiser**: Adam `lr=1e-3` + `CosineAnnealingLR`。
+    - **Metric**: pixel-level IoU (crack class)。
+    - **早停**: validation IoU 冇進步 `patience` epoch 就停,
+      save best 到 `models/crack_segmenter.pt`。
+    - **Augmentation**: `torchvision.transforms.v2` + `tv_tensors.Mask`,
+      確保 flip / rotate / crop 對 image 同 mask 同步 apply。
+    - Typical IoU: M1 CPU / MPS 跑 15-20 epoch 可以 hit
+      ≈ 0.72 IoU on DeepCrack val split。
     """
 )
 
 st.divider()
 
 # -------------------- Dataset --------------------
-st.header("4. 數據集 (Dataset)")
+st.header("4. 數據集 (Datasets)")
 
 st.markdown(
     """
-    **Concrete Crack Images for Classification** (作者: Çağlar Fırat
-    Özgenel,Mendeley Data id `5y9wdsg2zt`,version 2)。
+    Demo 用兩個獨立公開 dataset — 一個訓練 classifier,一個訓練
+    segmenter。兩個都 **唔會 redistribute**,只用 script 拉。
 
-    - 40,000 張 227x227 RGB 相
-    - 20,000 張 **Positive** (有裂縫) / 20,000 張 **Negative** (冇裂縫)
-    - License: CC BY 4.0
+    **4.1 Classifier — Özgenel CCIC (Mendeley `5y9wdsg2zt`, v2)**
 
-    `src.dataset.CrackDataset` 會將 `Positive/` 同 `Negative/`
-    兩個 folder 打平成一個 index,再 apply `torchvision.transforms`
-    嘅 train 或者 eval transform。
+    - 40,000 張 227×227 RGB 相 (20k Positive / 20k Negative),
+      METU 校園混凝土 facade。
+    - License: CC-BY-4.0。
+    - 預設用 `src.splits.three_way_split_indices(seed=42)`
+      切成 70 / 15 / 15 train / val / test。
+    - Label 次序: `0 = No Crack`、`1 = Crack`
+      (`src.model.CLASS_NAMES`)。
 
-    Label 跟 `src.model.CLASS_NAMES` 嘅次序:
-    `0 = No Crack`、`1 = Crack`。
+    > ℹ️ **Demo 實際跑緊嘅**: 2.3 GB Mendeley zip 唔易直接落到,
+    > 所以 `scripts/prepare_data.py` 會由 HuggingFace
+    > `Vizuara/concrete-crack-dataset` (800 張相 + 分割 mask) 抽,
+    > 每張切 2×2 patch、用 mask 判斷有冇 crack,整返一個
+    > 3,200 張嘅細 dataset。
 
-    > ℹ️ **個 demo 實際用緊嘅係乜?** 2.3 GB 嘅 Mendeley zip 而家唔易直接落到,
-    > 所以呢個 demo 用咗 HuggingFace 上面 `Vizuara/concrete-crack-dataset`
-    > (800 張有裂縫相 + segmentation mask),跟住用個 script
-    > `scripts/prepare_data.py` 將每張相切成 2x2 patch,用對應 mask
-    > 判斷每個 patch 係咪 crack,再整返一個 3,200 張細 dataset。
+    **4.2 Segmenter — DeepCrack (Zou 2018)**
+
+    - 537 張 train + 237 張 test 嘅 RGB 相,每張有 pixel-level
+      binary crack mask。
+    - License: 限制 non-commercial research / 教育用途。
+    - `scripts/prepare_seg_data.py` 會下載 GitHub 嗰個 repo,
+      解埋入面嵌套嘅 `DeepCrack.zip`,再 split 返
+      `data_seg/{train,val,test}/{images,masks}/` (train 80/20 再
+      cut val,seed = 42)。
+
+    **4.3 做 HK 樣本**
+
+    - `sample_images/` 裡面淨係 Özgenel CCIC 嘅 CC-BY 相,
+      並 **唔會** 夾帶 HK Buildings Department 嘅圖片 (版權不許
+      redistribute)。
+    - 全部 dataset 出處同 license 見
+      [`data/DATASETS.md`](../../data/DATASETS.md)。
     """
 )
 
@@ -427,23 +485,112 @@ st.info(
 
 st.divider()
 
-# -------------------- Evaluation --------------------
-st.header("7. 模型評估 (Evaluation 頁)")
+# -------------------- Segmentation --------------------
+st.header("7. Segmentation (U-Net) 分支")
 
 st.markdown(
     """
-    `pages/2_Evaluation.py` 係一個獨立 dashboard,專門 re-score 現時
-    `models/crack_classifier.pt`。邏輯抽咗去 `src/evaluate.py`,
-    所以同樣可以喺 notebook 或者 smoke test 入面重用。
+    為咗答 HK MBIS 真正關心嘅「**邊度爆 + 有幾嚴重**」問題,
+    classifier 出 Crack 之後會 trigger 一個獨立嘅 **pixel-level
+    segmenter**。相關檔案:
+
+    - `src/seg_model.py` — 自家整嘅小型 U-Net (~1.9M params),
+      4 層 encoder / decoder + bottleneck,`base_channels=16`,
+      專登細啲方便 CPU inference。
+    - `src/seg_dataset.py` — 用 `torchvision.transforms.v2` +
+      `tv_tensors.Mask` 做 **image / mask 同步** augmentation
+      (flip / rotate / crop 保證對齊)。
+    - `src/seg_train.py` — BCE + Dice loss、Adam + cosine LR、
+      早停 (validation IoU)。
+    - `src/seg_infer.py` — `predict_mask()` 出 binary mask,
+      `mask_stats()` 用 `cv2.connectedComponents` +
+      `cv2.distanceTransform` + 形態學 skeleton 計出 coverage、
+      component count、area、**max width (px)**、
+      **length (px)**。
+    - `src/seg_viz.py` — 用半透明紅色疊罩嚟 render overlay。
+    - `backend/routers/segment.py` — `POST /api/segment`
+      (base64 overlay + base64 mask + stats dict)。
+    """
+)
+
+st.graphviz_chart(
+    """
+    digraph Seg {
+        rankdir=LR;
+        node [shape=box, style="rounded,filled", fillcolor="#e6f0ff",
+              fontname="Helvetica", fontsize=10];
+        edge [fontname="Helvetica", fontsize=9];
+
+        img    [label="Input image\\n(PIL RGB)"];
+        resize [label="Resize 384x384\\n+ normalise"];
+        unet   [label="U-Net forward\\n[1, 1, 384, 384] logits"];
+        sig    [label="sigmoid + threshold 0.5"];
+        upsz   [label="Resize back to\\noriginal H x W"];
+        stats  [label="mask_stats()\\ncoverage / max_width_px /\\nlength_px / components",
+                fillcolor="#fff4e6"];
+        overlay[label="overlay_mask()\\n(red tint, alpha=0.5)",
+                fillcolor="#fff4e6"];
+        resp   [label="SegmentResponse\\n(overlay_png_b64 +\\n mask_png_b64 + stats)",
+                shape=note, fillcolor="#e6ffed"];
+
+        img -> resize -> unet -> sig -> upsz;
+        upsz -> stats;
+        upsz -> overlay;
+        stats -> resp;
+        overlay -> resp;
+    }
+    """,
+    use_container_width=True,
+)
+
+st.markdown(
+    """
+    **點解揀 segmentation,唔揀 YOLO?**
+
+    - **License**: Ultralytics YOLO 係 **AGPL-3.0**,同 demo repo 嘅
+      **MIT** 有衝突;DeepCrack / CRACK500 等 segmentation dataset
+      license 相對 friendly。
+    - **合規對應**: Pixel mask 可以直接由 `max_width_px` 估 crack
+      width (配合現場 calibration),對應 SUC 2013 約 0.2 / 0.3 mm
+      嘅限值;YOLO bounding box 做唔到 pixel-accurate 嘅量度。
+    - **Side-by-side**: Grad-CAM 答「Classifier 望緊邊?」,
+      Segmentation 答「裂縫 pixel 喺邊度?」 — 兩者並排一齊睇,
+      就可以肉眼 debug classifier 係咪 look at the right thing。
+    """
+)
+
+st.info(
+    "px → mm 換算要現場校準 (相機焦距、拍攝距離、或者入鏡擺條尺/"
+    "crack gauge)。所以 AI 報告同 UI 兩邊都 **只** 顯示 px，"
+    "再加警示 caption 提醒用家要自己做 calibration — 唔會假扮出 mm。",
+    icon=":material/info:",
+)
+
+st.divider()
+
+# -------------------- Evaluation --------------------
+st.header("8. 模型評估 (Evaluation 頁)")
+
+st.markdown(
+    """
+    `frontend/pages/2_📊_Evaluation.py` 係一個獨立 dashboard,call
+    backend 嘅 `POST /api/evaluate` 再 re-score 現時
+    `models/crack_classifier.pt`。邏輯抽咗去 `src/evaluate.py`
+    (重用 `src/splits.py` 嘅 split 函數),所以 training、
+    evaluation、notebook、smoke test 睇嘅係同一份 index list。
 
     **Pipeline 嘅重點:**
 
-    1. 用同 training 時 **一樣 seed 嘅 80 / 20 split**
-       (`torch.Generator().manual_seed(42)`),確保度量到嘅係真
-       held-out set,唔係睇過嘅訓練相。
-    2. 跑一次 forward pass 攞到成個 validation set 嘅
-       softmax 機率 `probs[N, 2]`,連埋每張相嘅 file path 儲起。
-    3. 任何同 threshold 相關嘅 metric (accuracy、confusion matrix、
+    1. 用同 training 時 **一樣 seed 嘅 70 / 15 / 15 split**
+       (`src.splits.three_way_split_indices(seed=42)`),確保
+       度量到嘅係真 held-out set,唔係睇過嘅訓練相。
+    2. 用 sidebar 揀要 score 邊個 slice:
+       - **Test** (預設) — 完全冇掂過,俾一個冇 selection bias 嘅
+         generalisation 數字。
+       - **Val** — 揀 best checkpoint 嗰個 slice,數字會樂觀少少。
+    3. 跑一次 forward pass 攞到選中 slice 嘅 softmax 機率
+       `probs[N, 2]`,連埋每張相嘅 file path 儲起。
+    4. 任何同 threshold 相關嘅 metric (accuracy、confusion matrix、
        per-class precision / recall / F1) 之後都可以
        `metrics_at_threshold(probs, targets, t)` 即時計出嚟,
        唔使 forward 多次 —— 所以 sidebar 嘅 threshold slider 拉到
@@ -463,18 +610,20 @@ st.graphviz_chart(
               shape=cylinder, fillcolor="#e6ffed"];
         data [label="data/Positive + Negative\\n(3,200 patches)",
               shape=cylinder, fillcolor="#e6ffed"];
-        split [label="seeded 80/20 split\\n(Generator seed=42)",
+        split [label="seeded 70/15/15 split\\n(three_way_split_indices, seed=42)",
+               fillcolor="#eef5ff"];
+        pick  [label="pick slice\\n(val | test)",
                fillcolor="#eef5ff"];
         fwd   [label="forward pass (no_grad)\\n-> probs[N, 2]",
                fillcolor="#eef5ff"];
-        store [label="EvaluationResult\\n(probs, targets, paths)",
+        store [label="EvaluationResult\\n(probs, targets, paths, split)",
                shape=note, fillcolor="#fff0f0"];
         thr   [label="metrics_at_threshold(t)",
                fillcolor="#fff4e6"];
         ui    [label="Accuracy / P / R / F1\\nConfusion matrix\\nThreshold sweep\\nWorst errors",
                fillcolor="#fff4e6"];
 
-        data -> split -> fwd;
+        data -> split -> pick -> fwd;
         ckpt -> fwd -> store -> thr -> ui;
     }
     """,
@@ -485,7 +634,8 @@ st.markdown(
     """
     頁面入面你會見到:
 
-    - **Dataset 同 split** — total / train / val / 每個 class 嘅 support。
+    - **Dataset 同 split** — total / train / val / test + 你 score
+      緊邊個 slice 嘅 class balance。
     - **Headline metrics** — Accuracy、Crack recall (最重要,漏報就
       大鑊)、Crack precision。
     - **Classification report** — 兩個 class 齊齊有 precision / recall /
@@ -508,7 +658,7 @@ st.caption(
 st.divider()
 
 # -------------------- AI features --------------------
-st.header("8. HKBU GenAI 整合 (AI 功能)")
+st.header("9. HKBU GenAI 整合 (AI 功能)")
 
 st.markdown(
     """
@@ -575,34 +725,60 @@ st.markdown(
 st.divider()
 
 # -------------------- Repo layout --------------------
-st.header("9. 專案目錄結構")
+st.header("10. 專案目錄結構")
 
 st.code(
     """.
-app.py                 # Streamlit 主頁 (揀相 + 預測 + Grad-CAM + AI 備註 + 對答)
-pages/
-  1_Architecture.py    # <- 你而家睇緊呢一頁
-  2_Evaluation.py      # 用 seeded val split 重新評估現時 checkpoint
-src/
-  model.py             # ResNet18 + 新 classifier head,load/save helper
-  dataset.py           # CrackDataset 同 train/eval transform
-  train.py             # 兩階段 CLI training script
-  predict.py           # 單張相嘅推論 helper
+backend/               # FastAPI 服務 (PyTorch + Grad-CAM + U-Net + HKBU GenAI)
+  main.py              # FastAPI app + CORS + routers + lifespan preload
+  config.py            # 環境變數 / 路徑 (含 SEG_MODEL_PATH)
+  deps.py              # get_model / get_seg_model (lru_cache) + helpers
+  schemas.py           # Pydantic: SegStats / SegmentResponse / ...
+  routers/
+    health.py          # GET  /api/health (含 has_seg_weights)
+    samples.py         # GET  /api/samples  /  /api/samples/{name}
+    predict.py         # POST /api/predict  /  /api/gradcam
+    segment.py         # POST /api/segment  (U-Net overlay + mask + stats)
+    ai.py              # POST /api/ai/report  /  /api/ai/chat
+    evaluate.py        # POST /api/evaluate  +  /api/dataset-image
+frontend/                # Streamlit 前端 (HTTP client,唔用 torch)
+  🏠_Home.py             # 揀相 + 預測 + Grad-CAM + Segmentation + AI 報告
+  api_client.py          # requests wrapper (含 segment_sample / segment_upload)
+  pages/
+    1_🏗️_Architecture.py  # <- 你而家睇緊
+    2_📊_Evaluation.py    # 用 /api/evaluate 重新評估 classifier
+src/                   # 共享 ML code (backend import 嚟用)
+  constants.py         # CLASS_NAMES 等無 torch 依賴嘅 constant
+  model.py             # ResNet18 + classifier head + load/save
+  dataset.py           # CrackDataset + train/eval transform
+  train.py             # 兩階段 classifier training CLI
+  predict.py           # 單張相 classifier 推論 helper
   gradcam.py           # Grad-CAM overlay / raw map / dominant_quadrant
-  evaluate.py          # evaluate_checkpoint + metrics_at_threshold
-  llm.py               # HKBU GenAI REST wrapper (chat / chat_messages)
-  ai_prompts.py        # ZH/EN system prompt + build_prediction_context
+  seg_model.py         # 小型 U-Net + load_seg_model
+  seg_dataset.py       # CrackSegDataset + v2 transform (image+mask)
+  seg_train.py         # BCE+Dice + IoU 早停嘅 segmentation training CLI
+  seg_infer.py         # predict_mask + mask_stats (cv2-based)
+  seg_viz.py           # overlay_mask / draw_mask_contours
+  evaluate.py          # classifier re-scoring (val / test split)
+  splits.py            # SSOT 70/15/15 train/val/test
+  metrics.py           # metrics_at_threshold + ROC / AUC
+  llm.py               # HKBU GenAI REST wrapper
+  ai_prompts.py        # ZH/EN prompt + build_prediction_context
+                       #   (含 [Segmentation] block)
 scripts/
-  prepare_data.py      # 由 HuggingFace parquet 整返個分類 dataset
-  smoke_test.py        # 跑一次全部 backend module 嘅 sanity check
+  prepare_data.py      # 拉 HuggingFace classification dataset
+  prepare_seg_data.py  # 拉 DeepCrack + 整返 data_seg/ split
+  smoke_test.py        # 跑一次 classifier + segmenter sanity
 notebooks/
   01_explore_and_train.ipynb
-sample_images/         # 主頁 dropdown 用嘅示範相
+sample_images/         # 主頁 dropdown 用嘅示範相 (Özgenel CC-BY only)
 models/                # 訓練好嘅 .pt weight (gitignored)
-data/                  # 原始 / 生成嘅 dataset (gitignored)
-.env                   # HKBU_API_KEY 等 secret (gitignored)
+  crack_classifier.pt  #   ResNet18 分類 head
+  crack_segmenter.pt   #   U-Net pixel mask
+data/                  # 分類原始 dataset (gitignored, 有 DATASETS.md)
+data_seg/              # DeepCrack split 出嚟嘅 segmentation data (gitignored)
+.env                   # HKBU_API_KEY / BACKEND_URL 等 secret (gitignored)
 .env.example           # 俾其他人參考嘅 template
-requirements.txt
 README.md""",
     language="text",
 )
@@ -610,29 +786,41 @@ README.md""",
 st.divider()
 
 # -------------------- Limitations --------------------
-st.header("10. 已知限制 (Limitations)")
+st.header("11. 已知限制 (Limitations)")
 
 st.markdown(
     """
-    - **Domain gap (分佈差異)。** 訓練相都係乾淨、近距離、光線均勻嘅
-      crop;真實地盤相有雜物 (鋼筋、陰影、人、工具)、
-      反光同 motion blur,預期 accuracy 會跌明顯一截。
-    - **淨係出 binary label。** 個 model 唔會 localise、量度、
-      或者判斷裂縫嚴重程度;表面裂痕同結構性裂縫睇落好似。
-    - **Confidence 未 calibrate。** softmax 個 probability *唔係*
-      真實世界 damage 嘅機率,threshold 要當成 operational knob 去調,
-      唔好當佢係機率解讀。
-    - **Val 唔係 test。** Evaluation 頁報嘅係 held-out **validation**
-      accuracy;因為 training 時揀 best-val checkpoint,呢個數
-      係 generalisation 嘅 **樂觀上限**。想做真·unbiased evaluation
-      要另外切一個冇掂過嘅 test set (例如 70 / 15 / 15)。
-    - **Grad-CAM 係粗粒度嘅。** Upsample 之前先至 7x7,
-      佢係一種「解釋」,唔係 segmentation mask。`dominant_quadrant`
-      俾 LLM 做 hint,亦都係象限級嘅粗描述,唔好當 pixel 定位。
-    - **LLM 會錯。** HKBU GenAI 只係睇到預測結果字串,冇睇原圖,
-      所以佢嘅「成因推斷」係一般土木知識 + 當前 prediction 嘅 paraphrase,
-      唔可以代替駐場工程師判斷。`.env` 無 `HKBU_API_KEY` 會 fallback
-      到 error banner,唔會 crash,但 AI section 就用唔到。
-    - **淨係針對混凝土。** 磚、柏油、木,統統超出範圍。
+    - **Domain gap (HK-specific)。** Classifier 嚟自 METU 校園 (Özgenel),
+      segmenter 嚟自 DeepCrack (路面 + 一般混凝土),兩個都 **唔係 HK**。
+      真正 MBIS target 係 70s-80s 瓷磚或批盪 facade,仲會有滲水痕、
+      efflorescence、algae、冷氣機水漬 — 呢啲 demo 係見唔到嘅。
+    - **Defect 類型覆蓋好窄。** Model 只分「crack vs 冇 crack」,
+      唔處理 spalling、rebar rust staining、efflorescence、
+      honeycombing、tile drummy、algae。真實 HK MBIS 報告好多時
+      cracks 其實係小眾,呢啲先係主角。
+    - **Px,唔係 mm。** Segmenter 只出 `max_width_px` / `length_px`,
+      冇 camera intrinsics 或者現場擺條尺/crack gauge,單張相決定
+      唔到佢係 SUC 2013 0.2 mm / 0.3 mm 入面定邊度。**AI 報告有
+      warning caveat 提醒要 on-site calibration。**
+    - **單張相決策。** 冇 video、冇多角度 aggregation,所以方向、
+      深度、活動性 (是否仍在擴張) 完全判斷唔到。
+    - **Confidence 未 calibrate。** softmax probability 同 mask
+      threshold 都係 uncalibrated;當佢係 ranking knob 就岩,
+      當真實概率就有 bias。
+    - **Grad-CAM ≠ segmentation。** Grad-CAM 答「Classifier 望緊邊?」,
+      U-Net 答「Crack pixel 喺邊?」 — 兩者並排畀 reviewer 肉眼對
+      得返個意思,唔好當做同一件事。
+    - **Val vs Test 係 in-distribution。** 70/15/15 split + seed
+      42,training 時揀 best-val、最尾先跑 test,所以 Evaluation
+      頁報嘅係冇 selection bias 嘅 generalisation 估計 — 但 test
+      同 train 同部相機、同個 dataset,真正 OOD (地盤實拍) 就要
+      自己整個 site test set 先算得準。
+    - **LLM 會錯。** HKBU GenAI 只睇到 prediction + seg stats 字串,
+      冇掂過原圖。報告入面嘅 HK 條文引用係 prompt engineering 出嚟,
+      唔代替 RSE / AP judgement。`.env` 無 `HKBU_API_KEY` 就會 fallback
+      到 error banner,唔會 crash。
+    - **Code 同 Dataset license 分開。** 整個 repo code 係 MIT,
+      但 Özgenel CC-BY 同 DeepCrack non-commercial 限制仍然
+      apply 喺 dataset 上面 — 詳情睇 `data/DATASETS.md`。
     """
 )

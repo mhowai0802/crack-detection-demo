@@ -27,6 +27,9 @@ ENV/
 # Dataset (too large to commit)
 data/
 !data/.gitkeep
+!data/DATASETS.md
+data_seg/
+!data_seg/.gitkeep
 
 # Training artifacts
 runs/
@@ -46,6 +49,12 @@ models/*.pth
 .env
 .env.local
 !.env.example
+
+# HK Buildings Department sample photos (Crown Copyright, local-demo only)
+# Fetched by scripts/fetch_hk_samples.py — never commit / never push.
+sample_images/hk_bd_*.jpg
+sample_images/hk_bd_*.jpeg
+sample_images/hk_bd_*.png
 
 # OS
 Thumbs.db

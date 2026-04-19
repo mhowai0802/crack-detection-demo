@@ -7,9 +7,22 @@ Example
 
 Strategy
 --------
-The backbone is frozen for the first ``--freeze-epochs`` epochs so only the
-new classifier head learns. After that the whole network is unfrozen for
-end-to-end fine-tuning at a lower learning rate.
+The backbone is frozen for the first ``--freeze-epochs`` epochs so only
+the new classifier head learns. After that the whole network is unfrozen
+for end-to-end fine-tuning at a lower learning rate.
+
+Data split
+----------
+We use a **three-way** train / val / test split (default 70 / 15 / 15)
+seeded from ``--seed`` via ``src.splits.three_way_split_indices``:
+
+* ``train``  — gradient updates (with augmentation).
+* ``val``    — monitored every epoch; the best val-accuracy checkpoint is
+  saved. This slice drives model selection, so reporting on it is
+  optimistically biased.
+* ``test``   — fully held out. Scored **once** at the end of training for
+  an unbiased generalisation number. Never seen by the optimiser or the
+  checkpoint-selection logic.
 """
 
 from __future__ import annotations
@@ -26,11 +39,17 @@ import torch.nn as nn
 from sklearn.metrics import classification_report, confusion_matrix
 from torch.optim import Adam
 from torch.optim.lr_scheduler import StepLR
-from torch.utils.data import DataLoader, Subset, random_split
+from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
 from src.dataset import CrackDataset, get_eval_transform, get_train_transform
 from src.model import CLASS_NAMES, build_model, freeze_backbone, unfreeze_all
+from src.splits import (
+    DEFAULT_SEED,
+    DEFAULT_TEST_RATIO,
+    DEFAULT_VAL_RATIO,
+    three_way_split_indices,
+)
 
 
 def seed_everything(seed: int = 42) -> None:
@@ -43,24 +62,27 @@ def seed_everything(seed: int = 42) -> None:
 def split_dataset(
     data_dir: Path,
     val_ratio: float,
+    test_ratio: float,
     seed: int,
-) -> Tuple[Subset, Subset]:
-    """80/20 (configurable) split with separate train/eval transforms."""
+) -> Tuple[Subset, Subset, Subset]:
+    """Seeded train / val / test split with separate train/eval transforms.
+
+    Train gets augmentation (``get_train_transform``); val and test share
+    the deterministic eval transform (``get_eval_transform``) so their
+    numbers are comparable.
+    """
     full_train = CrackDataset(data_dir, transform=get_train_transform())
     full_eval = CrackDataset(data_dir, transform=get_eval_transform())
 
     n_total = len(full_train)
-    n_val = int(n_total * val_ratio)
-    n_train = n_total - n_val
-
-    generator = torch.Generator().manual_seed(seed)
-    train_split, val_split = random_split(
-        range(n_total), [n_train, n_val], generator=generator
+    train_idx, val_idx, test_idx = three_way_split_indices(
+        n_total, val_ratio=val_ratio, test_ratio=test_ratio, seed=seed
     )
 
-    train_subset = Subset(full_train, list(train_split))
-    val_subset = Subset(full_eval, list(val_split))
-    return train_subset, val_subset
+    train_subset = Subset(full_train, train_idx)
+    val_subset = Subset(full_eval, val_idx)
+    test_subset = Subset(full_eval, test_idx)
+    return train_subset, val_subset, test_subset
 
 
 def run_epoch(
@@ -115,9 +137,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-3, help="LR for head")
     parser.add_argument("--finetune-lr", type=float, default=1e-4, help="LR after unfreeze")
-    parser.add_argument("--val-ratio", type=float, default=0.2)
+    parser.add_argument(
+        "--val-ratio",
+        type=float,
+        default=DEFAULT_VAL_RATIO,
+        help="Fraction used for checkpoint selection (default 0.15).",
+    )
+    parser.add_argument(
+        "--test-ratio",
+        type=float,
+        default=DEFAULT_TEST_RATIO,
+        help=(
+            "Fraction fully held out; scored once at the end for an "
+            "unbiased number. Set 0 to disable test-set reporting "
+            "(default 0.15)."
+        ),
+    )
     parser.add_argument("--num-workers", type=int, default=2)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument(
         "--output", type=Path, default=Path("models/crack_classifier.pt")
     )
@@ -136,8 +173,14 @@ def main() -> None:
 
     print(f"Using device: {device}")
     print(f"Loading dataset from: {args.data_dir.resolve()}")
-    train_set, val_set = split_dataset(args.data_dir, args.val_ratio, args.seed)
-    print(f"Train size: {len(train_set)} | Val size: {len(val_set)}")
+    train_set, val_set, test_set = split_dataset(
+        args.data_dir, args.val_ratio, args.test_ratio, args.seed
+    )
+    print(
+        f"Train size: {len(train_set)} | "
+        f"Val size: {len(val_set)} | "
+        f"Test size: {len(test_set)}"
+    )
 
     train_loader = DataLoader(
         train_set,
@@ -152,6 +195,17 @@ def main() -> None:
         shuffle=False,
         num_workers=args.num_workers,
         pin_memory=device.type == "cuda",
+    )
+    test_loader = (
+        DataLoader(
+            test_set,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=device.type == "cuda",
+        )
+        if len(test_set) > 0
+        else None
     )
 
     model = build_model(num_classes=len(CLASS_NAMES), pretrained=True).to(device)
@@ -198,10 +252,29 @@ def main() -> None:
     duration = time.time() - start
     print(f"\nTraining finished in {duration / 60:.1f} min. Best val acc: {best_val_acc:.4f}")
 
-    print("\nFinal validation report:")
+    print("\nFinal validation report (used for checkpoint selection — optimistic):")
     print(classification_report(val_targets, val_preds, target_names=CLASS_NAMES))
     print("Confusion matrix (rows=true, cols=pred):")
     print(confusion_matrix(val_targets, val_preds))
+
+    # Reload the best checkpoint before scoring the held-out test set so
+    # the reported number matches what the backend will serve.
+    if test_loader is not None:
+        if args.output.exists():
+            model.load_state_dict(torch.load(args.output, map_location=device))
+        print("\nHeld-out test report (unbiased — best checkpoint):")
+        _, test_acc, test_preds, test_targets = run_epoch(
+            model, test_loader, criterion, None, device, "Test"
+        )
+        print(f"Test accuracy: {test_acc:.4f}")
+        print(classification_report(test_targets, test_preds, target_names=CLASS_NAMES))
+        print("Confusion matrix (rows=true, cols=pred):")
+        print(confusion_matrix(test_targets, test_preds))
+    else:
+        print(
+            "\nTest split was empty (--test-ratio 0). Skipping held-out "
+            "test report."
+        )
 
 
 if __name__ == "__main__":

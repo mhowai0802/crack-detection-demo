@@ -14,7 +14,15 @@ import torch.nn as nn
 from torchvision import models
 from torchvision.models import ResNet18_Weights
 
-CLASS_NAMES = ["No Crack", "Crack"]
+from src.constants import CLASS_NAMES  # re-exported for backward compatibility
+
+__all__ = [
+    "CLASS_NAMES",
+    "build_model",
+    "freeze_backbone",
+    "unfreeze_all",
+    "load_model",
+]
 
 
 def build_model(num_classes: int = 2, pretrained: bool = True) -> nn.Module:
